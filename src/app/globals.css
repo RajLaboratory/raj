@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { --bg: #f6f9fd; --surface: #ffffff; --ink: #0f1f38; --muted: #5b6b85; --line: #dbe4f0; }
+.dark { --bg: #0b1424; --surface: #111d33; --ink: #e6edf8; --muted: #94a3bd; --line: #223353; }
+
+body { background: var(--bg); color: var(--ink); }
+:focus-visible { outline: 2px solid #1f62ea; outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }

@@ -1,0 +1,1206 @@
+// Raj Laboratory Management System - database schema
+// Conventions:
+//  * Money is stored as integer paise (Int). Never floats.
+//  * Every business table carries branchId (multi-branch ready).
+//  * Soft delete via deletedAt on clinical/master data. Financial rows are never deleted.
+//  * Ledger-style tables (payments, refunds, credit notes, audit) are append-only.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pg_trgm]
+}
+
+// ───────────────────────── Enums ─────────────────────────
+
+enum Sex {
+  MALE
+  FEMALE
+  OTHER
+}
+
+enum PatientType {
+  WALK_IN
+  HOME_COLLECTION
+  CORPORATE
+  INSURANCE
+  REFERRED
+}
+
+enum ItemStatus {
+  ORDERED
+  SAMPLE_COLLECTED
+  SAMPLE_RECEIVED
+  PROCESSING
+  RESULT_ENTERED
+  UNDER_REVIEW
+  VERIFIED
+  APPROVED
+  REPORTED
+  DELIVERED
+  CANCELLED
+}
+
+enum OrderStatus {
+  OPEN
+  PARTIAL
+  COMPLETED
+  CANCELLED
+}
+
+enum ResultType {
+  NUMERIC
+  TEXT
+  POS_NEG
+  REACTIVE
+  DETECTED
+  PRESENT_ABSENT
+  DROPDOWN
+  RATIO
+  TITRE
+  GRADE
+}
+
+enum ResultFlag {
+  NORMAL
+  LOW
+  HIGH
+  CRITICAL_LOW
+  CRITICAL_HIGH
+  ABNORMAL
+  NONE
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  UPI
+  CARD
+  BANK_TRANSFER
+  ONLINE
+  CREDIT
+}
+
+enum CommissionType {
+  PERCENT
+  FIXED
+}
+
+enum CommissionScope {
+  DEFAULT
+  TEST
+  PACKAGE
+  DEPARTMENT
+}
+
+enum CommissionStatus {
+  PENDING
+  SETTLED
+  REVERSED
+}
+
+enum OutsourceStatus {
+  PENDING_DISPATCH
+  DISPATCHED
+  PARTNER_RECEIVED
+  REPORT_RECEIVED
+  RESULT_ENTERED
+  VERIFIED
+  CANCELLED
+}
+
+enum HomeStatus {
+  BOOKED
+  ASSIGNED
+  ON_THE_WAY
+  ARRIVED
+  SAMPLE_COLLECTED
+  CANCELLED
+  COMPLETED
+}
+
+enum OnlineBookingStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+}
+
+enum VisitType {
+  LAB
+  HOME
+}
+
+enum DeliveryChannel {
+  WHATSAPP
+  EMAIL
+  SMS
+}
+
+enum DeliveryStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+enum ReportSize {
+  A4
+  A5
+  CUSTOM
+}
+
+// ───────────────────────── Tenant / config ─────────────────────────
+
+model Branch {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  name      String
+  address   String?
+  phone     String?
+  email     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  users            User[]
+  settings         Setting[]
+  numberSequences  NumberSequence[]
+  patients         Patient[]
+  doctors          Doctor[]
+  departments      Department[]
+  tests            Test[]
+  orders           Order[]
+  invoices         Invoice[]
+  samples          Sample[]
+  reports          Report[]
+  reportTemplates  ReportTemplate[]
+  outsourcingLabs  OutsourcingLab[]
+  homeBookings     HomeCollectionBooking[]
+  onlineBookings   OnlineBooking[]
+  inventoryItems   InventoryItem[]
+  suppliers        Supplier[]
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  branchId  String
+  key       String
+  value     Json
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+  branch    Branch   @relation(fields: [branchId], references: [id])
+
+  @@unique([branchId, key])
+}
+
+model NumberSequence {
+  id       String @id @default(cuid())
+  branchId String
+  type     String // PATIENT | ORDER | INVOICE | SAMPLE | REPORT | RECEIPT | REFUND | CREDIT_NOTE | PO
+  year     Int // 0 when the sequence never resets
+  current  Int    @default(0)
+  branch   Branch @relation(fields: [branchId], references: [id])
+
+  @@unique([branchId, type, year])
+}
+
+// ───────────────────────── Auth & access ─────────────────────────
+
+model Role {
+  id          String           @id @default(cuid())
+  key         String           @unique
+  name        String
+  description String?
+  isSystem    Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+  permissions RolePermission[]
+  users       User[]
+}
+
+model Permission {
+  id          String           @id @default(cuid())
+  key         String           @unique // e.g. report.approve
+  module      String
+  description String?
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model User {
+  id             String    @id @default(cuid())
+  branchId       String
+  roleId         String
+  email          String    @unique
+  name           String
+  phone          String?
+  passwordHash   String
+  isActive       Boolean   @default(true)
+  mustChangePw   Boolean   @default(false)
+  totpSecretEnc  String?
+  totpEnabled    Boolean   @default(false)
+  failedLogins   Int       @default(0)
+  lockedUntil    DateTime?
+  lastLoginAt    DateTime?
+  signatureUrl   String? // pathologist signature image (storage key)
+  qualification  String? // shown under signature on reports
+  registrationNo String? // medical council registration
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  branch        Branch          @relation(fields: [branchId], references: [id])
+  role          Role            @relation(fields: [roleId], references: [id])
+  sessions      Session[]
+  loginActivity LoginActivity[]
+  phlebotomist  Phlebotomist?
+
+  @@index([branchId, roleId])
+}
+
+model Session {
+  id         String   @id @default(cuid())
+  userId     String
+  tokenHash  String   @unique // sha256 of the cookie token
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model LoginActivity {
+  id        String   @id @default(cuid())
+  userId    String?
+  email     String
+  success   Boolean
+  reason    String?
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  user      User?    @relation(fields: [userId], references: [id])
+
+  @@index([email, createdAt])
+  @@index([createdAt])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  branchId   String?
+  userId     String?
+  userName   String?
+  action     String // CREATE | UPDATE | DELETE | LOGIN | APPROVE | AMEND | ...
+  entity     String
+  entityId   String?
+  before     Json?
+  after      Json?
+  reason     String?
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([userId, createdAt])
+  @@index([createdAt])
+}
+
+// ───────────────────────── Patients ─────────────────────────
+
+model Patient {
+  id               String      @id @default(cuid())
+  branchId         String
+  uhid             String      @unique
+  firstName        String
+  middleName       String?
+  lastName         String?
+  fullName         String // denormalised for search
+  sex              Sex
+  dob              DateTime?
+  ageYears         Int? // used when only age is known
+  mobile           String // normalised 10-digit
+  altMobile        String?
+  whatsapp         String?
+  email            String?
+  address          String?
+  city             String?
+  state            String?
+  pincode          String?
+  bloodGroup       String?
+  patientType      PatientType @default(WALK_IN)
+  referringDoctorId String?
+  corporateName    String?
+  insuranceRef     String?
+  emergencyName    String?
+  emergencyPhone   String?
+  notes            String?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  deletedAt        DateTime?
+
+  branch    Branch           @relation(fields: [branchId], references: [id])
+  contacts  PatientContact[]
+  orders    Order[]
+  invoices  Invoice[]
+  bookings  HomeCollectionBooking[]
+  samples   Sample[]
+
+  @@index([branchId, mobile])
+  @@index([branchId, createdAt])
+  @@index([fullName])
+  @@index([email])
+}
+
+model PatientContact {
+  id        String  @id @default(cuid())
+  patientId String
+  name      String
+  relation  String?
+  phone     String
+  isPrimary Boolean @default(false)
+  patient   Patient @relation(fields: [patientId], references: [id])
+
+  @@index([patientId])
+}
+
+// ───────────────────────── Doctors & commission ─────────────────────────
+
+model Doctor {
+  id             String    @id @default(cuid())
+  branchId       String
+  code           String    @unique
+  name           String
+  specialization String?
+  clinic         String?
+  mobile         String?
+  whatsapp       String?
+  email          String?
+  address        String?
+  defaultCommissionType CommissionType @default(PERCENT)
+  defaultCommissionValue Int   @default(0) // percent x100 (10% = 1000) or fixed paise
+  bankDetails    Json? // encrypted-at-rest fields handled at app layer
+  notes          String?
+  isActive       Boolean   @default(true)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  deletedAt      DateTime?
+
+  branch      Branch           @relation(fields: [branchId], references: [id])
+  rules       CommissionRule[]
+  orders      Order[]
+  settlements CommissionSettlement[]
+
+  @@index([branchId, name])
+}
+
+model CommissionRule {
+  id       String          @id @default(cuid())
+  doctorId String
+  scope    CommissionScope
+  refId    String? // testId | packageId | departmentId, null for DEFAULT
+  type     CommissionType
+  value    Int // percent x100 or fixed paise
+  isActive Boolean         @default(true)
+  doctor   Doctor          @relation(fields: [doctorId], references: [id])
+
+  @@unique([doctorId, scope, refId])
+}
+
+model CommissionSettlement {
+  id        String   @id @default(cuid())
+  doctorId  String
+  amount    Int
+  method    PaymentMethod
+  reference String?
+  note      String?
+  paidAt    DateTime @default(now())
+  createdBy String?
+  doctor    Doctor   @relation(fields: [doctorId], references: [id])
+  items     OrderItem[]
+
+  @@index([doctorId, paidAt])
+}
+
+// ───────────────────────── Test master ─────────────────────────
+
+model Department {
+  id        String    @id @default(cuid())
+  branchId  String
+  code      String
+  name      String
+  sortOrder Int       @default(0)
+  isActive  Boolean   @default(true)
+  deletedAt DateTime?
+  branch    Branch    @relation(fields: [branchId], references: [id])
+  tests     Test[]
+
+  @@unique([branchId, code])
+}
+
+model Test {
+  id               String    @id @default(cuid())
+  branchId         String
+  departmentId     String
+  code             String
+  name             String
+  shortName        String?
+  category         String?
+  sampleType       String? // Blood (EDTA), Serum, Urine, ...
+  container        String? // Lavender top, Gel tube, ...
+  sampleVolume     String?
+  collectionNotes  String?
+  fastingRequired  Boolean   @default(false)
+  patientPrep      String?
+  method           String?
+  instrument       String?
+  tatHours         Int       @default(24)
+  price            Int       @default(0) // paise
+  discountPrice    Int?
+  costPrice        Int       @default(0)
+  outsourcePrice   Int? // what we pay the partner lab
+  isOutsourced     Boolean   @default(false)
+  gstPercentX100   Int       @default(0)
+  isActive         Boolean   @default(true)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime?
+
+  branch       Branch          @relation(fields: [branchId], references: [id])
+  department   Department      @relation(fields: [departmentId], references: [id])
+  parameters   TestParameter[]
+  packageTests PackageTest[]
+  orderItems   OrderItem[]
+  outsourcingRates OutsourcingRate[]
+
+  @@unique([branchId, code])
+  @@index([name])
+  @@index([departmentId])
+}
+
+model TestParameter {
+  id          String     @id @default(cuid())
+  testId      String
+  code        String
+  name        String
+  unit        String?
+  resultType  ResultType @default(NUMERIC)
+  decimals    Int        @default(1)
+  options     Json? // dropdown / grade choices
+  sortOrder   Int        @default(0)
+  method      String?
+  isReportable Boolean   @default(true)
+  test        Test       @relation(fields: [testId], references: [id], onDelete: Cascade)
+  ranges      TestReferenceRange[]
+  results     Result[]
+
+  @@unique([testId, code])
+}
+
+// Multiple rows per parameter; the engine picks the most specific match.
+model TestReferenceRange {
+  id            String   @id @default(cuid())
+  parameterId   String
+  sex           Sex?
+  ageMinDays    Int? // inclusive
+  ageMaxDays    Int? // exclusive
+  pregnancy     Boolean? // null = not applicable
+  method        String?
+  instrument    String?
+  low           Decimal? @db.Decimal(14, 4)
+  high          Decimal? @db.Decimal(14, 4)
+  criticalLow   Decimal? @db.Decimal(14, 4)
+  criticalHigh  Decimal? @db.Decimal(14, 4)
+  displayText   String? // printed as-is, e.g. "13.0 - 17.0" or "Negative"
+  normalValues  Json? // for qualitative parameters: values considered normal
+  parameter     TestParameter @relation(fields: [parameterId], references: [id], onDelete: Cascade)
+
+  @@index([parameterId])
+}
+
+model Package {
+  id            String    @id @default(cuid())
+  branchId      String
+  code          String
+  name          String
+  price         Int
+  isActive      Boolean   @default(true)
+  deletedAt     DateTime?
+  tests         PackageTest[]
+  orderItems    OrderItem[]
+
+  @@unique([branchId, code])
+}
+
+model PackageTest {
+  packageId String
+  testId    String
+  package   Package @relation(fields: [packageId], references: [id], onDelete: Cascade)
+  test      Test    @relation(fields: [testId], references: [id])
+
+  @@id([packageId, testId])
+}
+
+// ───────────────────────── Orders & billing ─────────────────────────
+
+model Order {
+  id          String      @id @default(cuid())
+  branchId    String
+  orderNo     String      @unique
+  patientId   String
+  doctorId    String?
+  status      OrderStatus @default(OPEN)
+  isHomeCollection Boolean @default(false)
+  clinicalNotes String?
+  pregnant    Boolean?
+  createdById String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  deletedAt   DateTime?
+
+  branch   Branch      @relation(fields: [branchId], references: [id])
+  patient  Patient     @relation(fields: [patientId], references: [id])
+  doctor   Doctor?     @relation(fields: [doctorId], references: [id])
+  items    OrderItem[]
+  invoice  Invoice?
+  samples  Sample[]
+  reports  Report[]
+  booking  HomeCollectionBooking?
+
+  @@index([branchId, createdAt])
+  @@index([patientId])
+  @@index([doctorId])
+}
+
+model OrderItem {
+  id            String     @id @default(cuid())
+  orderId       String
+  testId        String?
+  packageId     String?
+  description   String // snapshot of test/package name at booking time
+  listPrice     Int
+  discount      Int        @default(0)
+  netPrice      Int
+  status        ItemStatus @default(ORDERED)
+  isOutsourced  Boolean    @default(false)
+  // commission snapshot, fixed at invoice issue time
+  commissionRuleScope CommissionScope?
+  commissionType      CommissionType?
+  commissionValue     Int?
+  commissionAmount    Int              @default(0)
+  commissionStatus    CommissionStatus @default(PENDING)
+  settlementId        String?
+  cancelledAt   DateTime?
+  cancelReason  String?
+
+  order       Order      @relation(fields: [orderId], references: [id])
+  test        Test?      @relation(fields: [testId], references: [id])
+  package     Package?   @relation(fields: [packageId], references: [id])
+  settlement  CommissionSettlement? @relation(fields: [settlementId], references: [id])
+  invoiceItem InvoiceItem?
+  sampleTests SampleTest[]
+  results     Result[]
+  outsourcing OutsourcingOrder?
+
+  @@index([orderId])
+  @@index([testId])
+  @@index([status])
+}
+
+model Invoice {
+  id             String        @id @default(cuid())
+  branchId       String
+  invoiceNo      String        @unique
+  orderId        String        @unique
+  patientId      String
+  status         InvoiceStatus @default(DRAFT)
+  subtotal       Int           @default(0)
+  discount       Int           @default(0)
+  homeCharge     Int           @default(0)
+  otherCharges   Int           @default(0)
+  gstAmount      Int           @default(0)
+  netAmount      Int           @default(0)
+  // paid/due are derived from payments minus refunds; cached here and re-computed in one service
+  paidAmount     Int           @default(0)
+  dueAmount      Int           @default(0)
+  notes          String?
+  issuedAt       DateTime?
+  cancelledAt    DateTime?
+  cancelReason   String?
+  createdById    String?
+  createdAt      DateTime      @default(now())
+
+  branch      Branch        @relation(fields: [branchId], references: [id])
+  order       Order         @relation(fields: [orderId], references: [id])
+  patient     Patient       @relation(fields: [patientId], references: [id])
+  items       InvoiceItem[]
+  payments    Payment[]
+  refunds     Refund[]
+  creditNotes CreditNote[]
+
+  @@index([branchId, createdAt])
+  @@index([patientId])
+  @@index([status])
+}
+
+model InvoiceItem {
+  id          String    @id @default(cuid())
+  invoiceId   String
+  orderItemId String    @unique
+  description String
+  amount      Int
+  discount    Int       @default(0)
+  gstAmount   Int       @default(0)
+  invoice     Invoice   @relation(fields: [invoiceId], references: [id])
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id])
+
+  @@index([invoiceId])
+}
+
+model Payment {
+  id             String        @id @default(cuid())
+  invoiceId      String
+  receiptNo      String        @unique
+  method         PaymentMethod
+  amount         Int
+  reference      String? // UPI txn id, card last4, cheque no
+  idempotencyKey String?       @unique
+  receivedById   String?
+  receivedAt     DateTime      @default(now())
+  invoice        Invoice       @relation(fields: [invoiceId], references: [id])
+
+  @@index([invoiceId])
+  @@index([receivedAt])
+}
+
+model Refund {
+  id          String        @id @default(cuid())
+  invoiceId   String
+  refundNo    String        @unique
+  method      PaymentMethod
+  amount      Int
+  reason      String
+  approvedById String?
+  createdAt   DateTime      @default(now())
+  invoice     Invoice       @relation(fields: [invoiceId], references: [id])
+
+  @@index([invoiceId])
+}
+
+model CreditNote {
+  id        String   @id @default(cuid())
+  invoiceId String
+  noteNo    String   @unique
+  amount    Int
+  reason    String
+  createdAt DateTime @default(now())
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id])
+
+  @@index([invoiceId])
+}
+
+// ───────────────────────── Samples ─────────────────────────
+
+model Sample {
+  id          String    @id @default(cuid())
+  branchId    String
+  sampleNo    String    @unique
+  barcode     String    @unique
+  orderId     String
+  patientId   String // always equals order.patientId; enforced in service
+  sampleType  String
+  container   String?
+  collectedAt DateTime?
+  collectedById String?
+  receivedAt  DateTime?
+  receivedById String?
+  rejectedAt  DateTime?
+  rejectReason String?
+  createdAt   DateTime  @default(now())
+
+  branch  Branch       @relation(fields: [branchId], references: [id])
+  order   Order        @relation(fields: [orderId], references: [id])
+  patient Patient      @relation(fields: [patientId], references: [id])
+  tests   SampleTest[]
+
+  @@index([orderId])
+  @@index([patientId])
+}
+
+model SampleTest {
+  sampleId    String
+  orderItemId String
+  sample      Sample    @relation(fields: [sampleId], references: [id])
+  orderItem   OrderItem @relation(fields: [orderItemId], references: [id])
+
+  @@id([sampleId, orderItemId])
+}
+
+// ───────────────────────── Results & reports ─────────────────────────
+
+model Result {
+  id            String     @id @default(cuid())
+  orderItemId   String
+  parameterId   String
+  valueText     String? // as entered, including "<0.5" or "Positive"
+  valueNumeric  Decimal?   @db.Decimal(18, 6)
+  comparator    String? // "<" | ">" | null
+  unit          String?
+  flag          ResultFlag @default(NONE)
+  // snapshot of the range used at the time of entry
+  rangeSnapshot Json?
+  technicalNote String?
+  enteredById   String?
+  enteredAt     DateTime?
+  isLocked      Boolean    @default(false) // true once the report is approved
+  source        String     @default("MANUAL") // MANUAL | INSTRUMENT | OCR_DRAFT | PARTNER
+  isVerifiedEntry Boolean  @default(true) // false for OCR drafts until an operator confirms
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  deletedAt     DateTime?
+
+  orderItem OrderItem       @relation(fields: [orderItemId], references: [id])
+  parameter TestParameter   @relation(fields: [parameterId], references: [id])
+  comments  ResultComment[]
+  alerts    CriticalAlert[]
+
+  @@unique([orderItemId, parameterId])
+  @@index([parameterId, enteredAt])
+}
+
+model ResultComment {
+  id        String   @id @default(cuid())
+  resultId  String
+  kind      String // TECHNICAL | PATHOLOGIST | GENERAL
+  body      String
+  authorId  String?
+  createdAt DateTime @default(now())
+  result    Result   @relation(fields: [resultId], references: [id])
+
+  @@index([resultId])
+}
+
+model CriticalAlert {
+  id              String    @id @default(cuid())
+  resultId        String
+  value           String
+  raisedById      String?
+  raisedAt        DateTime  @default(now())
+  acknowledgedById String?
+  acknowledgedAt  DateTime?
+  actionTaken     String? // who was informed, how
+  result          Result    @relation(fields: [resultId], references: [id])
+
+  @@index([resultId])
+  @@index([acknowledgedAt])
+}
+
+model ReportTemplate {
+  id        String     @id @default(cuid())
+  branchId  String
+  name      String
+  size      ReportSize @default(A4)
+  layout    Json // header, footer, column config, show/hide blocks
+  isDefault Boolean    @default(false)
+  isActive  Boolean    @default(true)
+  branch    Branch     @relation(fields: [branchId], references: [id])
+  reports   Report[]
+}
+
+model Report {
+  id          String     @id @default(cuid())
+  branchId    String
+  reportNo    String     @unique
+  orderId     String
+  templateId  String?
+  status      ItemStatus @default(RESULT_ENTERED)
+  currentVersion Int     @default(0)
+  verifiedById String?
+  verifiedAt  DateTime?
+  approvedById String?
+  approvedAt  DateTime?
+  deliveredAt DateTime?
+  publicToken String?    @unique // random 256-bit token for portal links
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  deletedAt   DateTime?
+
+  branch     Branch           @relation(fields: [branchId], references: [id])
+  order      Order            @relation(fields: [orderId], references: [id])
+  template   ReportTemplate?  @relation(fields: [templateId], references: [id])
+  versions   ReportVersion[]
+  amendments ReportAmendment[]
+
+  @@index([orderId])
+  @@index([status])
+  @@index([branchId, createdAt])
+}
+
+// Immutable once written.
+model ReportVersion {
+  id         String   @id @default(cuid())
+  reportId   String
+  version    Int
+  snapshot   Json // frozen patient, tests, results, ranges, signatories
+  pdfKey     String? // storage key of the generated PDF
+  pdfSha256  String?
+  createdById String?
+  approvedById String?
+  createdAt  DateTime @default(now())
+  report     Report   @relation(fields: [reportId], references: [id])
+
+  @@unique([reportId, version])
+}
+
+model ReportAmendment {
+  id           String   @id @default(cuid())
+  reportId     String
+  fromVersion  Int
+  toVersion    Int
+  reason       String
+  changes      Json // [{parameter, from, to}]
+  requestedById String?
+  approvedById String?
+  createdAt    DateTime @default(now())
+  report       Report   @relation(fields: [reportId], references: [id])
+
+  @@index([reportId])
+}
+
+model Attachment {
+  id         String   @id @default(cuid())
+  entity     String // OutsourcingOrder | Result | HomeCollectionBooking ...
+  entityId   String
+  storageKey String
+  fileName   String
+  mimeType   String
+  sizeBytes  Int
+  sha256     String?
+  uploadedById String?
+  createdAt  DateTime @default(now())
+
+  @@index([entity, entityId])
+}
+
+// ───────────────────────── Outsourcing ─────────────────────────
+
+model OutsourcingLab {
+  id            String    @id @default(cuid())
+  branchId      String
+  code          String
+  name          String
+  contactPerson String?
+  phone         String?
+  email         String?
+  address       String?
+  reportingMethod String? // Email | Portal | Courier
+  isActive      Boolean   @default(true)
+  deletedAt     DateTime?
+  branch        Branch    @relation(fields: [branchId], references: [id])
+  orders        OutsourcingOrder[]
+  rates         OutsourcingRate[]
+
+  @@unique([branchId, code])
+}
+
+/// What the patient pays, and how long the report takes, when a partner lab processes a test.
+/// Shown on the public booking page so patients can compare labs. Not the same as OutsourcingOrder.partnerCost
+/// (what Raj Laboratory pays the partner).
+model OutsourcingRate {
+  id        String         @id @default(cuid())
+  labId     String
+  testId    String
+  price     Int // paise, charged to the patient
+  tatHours  Int
+  isActive  Boolean        @default(true)
+  updatedAt DateTime       @updatedAt
+  lab       OutsourcingLab @relation(fields: [labId], references: [id])
+  test      Test           @relation(fields: [testId], references: [id])
+
+  @@unique([labId, testId])
+  @@index([testId])
+}
+
+model OutsourcingOrder {
+  id            String          @id @default(cuid())
+  orderItemId   String          @unique
+  labId         String
+  status        OutsourceStatus @default(PENDING_DISPATCH)
+  partnerCost   Int
+  dispatchedAt  DateTime?
+  courier       String?
+  trackingNo    String?
+  expectedAt    DateTime?
+  receivedAt    DateTime?
+  createdAt     DateTime        @default(now())
+  orderItem     OrderItem       @relation(fields: [orderItemId], references: [id])
+  lab           OutsourcingLab  @relation(fields: [labId], references: [id])
+  results       OutsourcingResult[]
+
+  @@index([labId, status])
+}
+
+model OutsourcingResult {
+  id                 String   @id @default(cuid())
+  outsourcingOrderId String
+  attachmentId       String? // original partner report, always retained
+  ocrText            String?
+  extracted          Json? // draft rows; never final until reviewed
+  reviewedById       String?
+  reviewedAt         DateTime?
+  createdAt          DateTime @default(now())
+  outsourcingOrder   OutsourcingOrder @relation(fields: [outsourcingOrderId], references: [id])
+
+  @@index([outsourcingOrderId])
+}
+
+// ───────────────────────── Home collection ─────────────────────────
+
+model Phlebotomist {
+  id       String  @id @default(cuid())
+  userId   String  @unique
+  isActive Boolean @default(true)
+  user     User    @relation(fields: [userId], references: [id])
+  bookings HomeCollectionBooking[]
+}
+
+model HomeCollectionBooking {
+  id             String     @id @default(cuid())
+  branchId       String
+  patientId      String
+  orderId        String?    @unique
+  phlebotomistId String?
+  status         HomeStatus @default(BOOKED)
+  address        String
+  latitude       Float?
+  longitude      Float?
+  scheduledDate  DateTime   @db.Date
+  slot           String // "07:00-09:00"
+  charge         Int        @default(0)
+  paymentNote    String?
+  instructions   String?
+  arrivedAt      DateTime?
+  collectedAt    DateTime?
+  proofKey       String?
+  createdAt      DateTime   @default(now())
+
+  branch       Branch        @relation(fields: [branchId], references: [id])
+  patient      Patient       @relation(fields: [patientId], references: [id])
+  order        Order?        @relation(fields: [orderId], references: [id])
+  phlebotomist Phlebotomist? @relation(fields: [phlebotomistId], references: [id])
+
+  @@index([scheduledDate, status])
+  @@index([phlebotomistId, scheduledDate])
+}
+
+/// A booking request made by a patient on the public /portal page.
+/// It is NOT a patient or an order yet: reception confirms it by phone, then registers the patient.
+/// `items` is a price snapshot taken on the server at booking time (never trusted from the browser).
+model OnlineBooking {
+  id            String              @id @default(cuid())
+  branchId      String
+  reference     String              @unique
+  status        OnlineBookingStatus @default(PENDING)
+  name          String
+  phone         String
+  email         String?
+  age           Int?
+  sex           Sex?
+  visitType     VisitType
+  address       String?
+  preferredDate DateTime            @db.Date
+  slot          String
+  notes         String?
+  items         Json
+  totalPaise    Int
+  ip            String?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  branch Branch @relation(fields: [branchId], references: [id])
+
+  @@index([branchId, status, preferredDate])
+  @@index([phone])
+}
+
+// ───────────────────────── Inventory & purchase ─────────────────────────
+
+model Supplier {
+  id        String  @id @default(cuid())
+  branchId  String
+  name      String
+  contact   String?
+  phone     String?
+  email     String?
+  gstin     String?
+  address   String?
+  isActive  Boolean @default(true)
+  branch    Branch  @relation(fields: [branchId], references: [id])
+  orders    PurchaseOrder[]
+}
+
+model InventoryItem {
+  id         String  @id @default(cuid())
+  branchId   String
+  sku        String
+  name       String
+  category   String // VACUTAINER | NEEDLE | REAGENT | KIT | CONSUMABLE | STATIONERY
+  unit       String  @default("pcs")
+  minStock   Int     @default(0)
+  isActive   Boolean @default(true)
+  branch     Branch  @relation(fields: [branchId], references: [id])
+  batches    InventoryBatch[]
+  purchases  PurchaseItem[]
+
+  @@unique([branchId, sku])
+}
+
+model InventoryBatch {
+  id          String    @id @default(cuid())
+  itemId      String
+  batchNo     String
+  expiryDate  DateTime? @db.Date
+  quantity    Int // remaining
+  opening     Int       @default(0)
+  supplierId  String?
+  receivedAt  DateTime  @default(now())
+  item        InventoryItem @relation(fields: [itemId], references: [id])
+
+  @@unique([itemId, batchNo])
+  @@index([expiryDate])
+}
+
+model PurchaseOrder {
+  id         String   @id @default(cuid())
+  poNo       String   @unique
+  supplierId String
+  status     String   @default("DRAFT") // DRAFT | ORDERED | RECEIVED | CANCELLED
+  invoiceNo  String?
+  total      Int      @default(0)
+  paid       Int      @default(0)
+  createdAt  DateTime @default(now())
+  supplier   Supplier @relation(fields: [supplierId], references: [id])
+  items      PurchaseItem[]
+}
+
+model PurchaseItem {
+  id        String    @id @default(cuid())
+  poId      String
+  itemId    String
+  batchNo   String?
+  expiryDate DateTime? @db.Date
+  quantity  Int
+  rate      Int
+  gstPercentX100 Int  @default(0)
+  total     Int
+  po        PurchaseOrder @relation(fields: [poId], references: [id])
+  item      InventoryItem @relation(fields: [itemId], references: [id])
+}
+
+// ───────────────────────── QC ─────────────────────────
+
+model QcRecord {
+  id           String   @id @default(cuid())
+  branchId     String
+  instrument   String
+  parameter    String
+  material     String
+  lotNo        String
+  level        String?
+  target       Decimal  @db.Decimal(14, 4)
+  sd           Decimal  @db.Decimal(14, 4)
+  value        Decimal  @db.Decimal(14, 4)
+  zScore       Decimal? @db.Decimal(8, 3)
+  violatedRules String[] // Westgard rules e.g. ["1-3s"]
+  passed       Boolean  @default(true)
+  runAt        DateTime @default(now())
+  enteredById  String?
+
+  @@index([instrument, parameter, runAt])
+}
+
+// ───────────────────────── Messaging ─────────────────────────
+
+model Notification {
+  id         String          @id @default(cuid())
+  branchId   String?
+  channel    DeliveryChannel
+  kind       String // BOOKING | COLLECTED | PAYMENT | REPORT_READY | REMINDER
+  entity     String?
+  entityId   String?
+  to         String
+  status     DeliveryStatus  @default(QUEUED)
+  createdAt  DateTime        @default(now())
+
+  @@index([entity, entityId])
+}
+
+model WhatsappMessage {
+  id          String         @id @default(cuid())
+  branchId    String?
+  to          String
+  template    String
+  reportId    String?
+  providerMsgId String?      @unique
+  status      DeliveryStatus @default(QUEUED)
+  error       String?
+  attempts    Int            @default(0)
+  sentAt      DateTime?
+  deliveredAt DateTime?
+  readAt      DateTime?
+  createdAt   DateTime       @default(now())
+
+  @@index([reportId])
+  @@index([status])
+}
+
+model EmailMessage {
+  id         String         @id @default(cuid())
+  branchId   String?
+  to         String
+  subject    String
+  reportId   String?
+  status     DeliveryStatus @default(QUEUED)
+  error      String?
+  attempts   Int            @default(0)
+  sentAt     DateTime?
+  createdAt  DateTime       @default(now())
+
+  @@index([reportId])
+}
+
+model OtpRequest {
+  id          String   @id @default(cuid())
+  mobile      String
+  codeHash    String
+  attempts    Int      @default(0)
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  ip          String?
+  createdAt   DateTime @default(now())
+
+  @@index([mobile, createdAt])
+}
